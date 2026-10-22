@@ -14,7 +14,7 @@
  *   client -> MSG <ciphertext hex> <encrypted secret key hex> <signature hex> <client e> <client n>
  *   server -> RESULT ACCEPTED   |   RESULT REJECTED <reason>
  */
-#include "common/net.h"
+#include "common/net.h"          // keep this FIRST: it pulls in the Windows socket headers
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -24,7 +24,6 @@
 #include "common/idea.h"
 #include "common/whirlpool.h"
 #include "common/rsa.h"
-#include "common/net.h"
 #include "common/cli.h"
 
 using namespace std;
@@ -38,9 +37,19 @@ static vector<string> splitWords(const string &line) {
     return w;
 }
 
+// text of the key parameters, as shown in the "Input:" part of the output
+static string publicKeyText(const rsa::KeyPair &kp) {
+    return "(e = " + to_string(kp.e) + ", n = " + to_string(kp.n) + ")";
+}
+static string privateKeyText(const rsa::KeyPair &kp) {
+    return "(d = " + to_string(kp.d) + ", n = " + to_string(kp.n) + ", p = " + to_string(kp.p) +
+           ", q = " + to_string(kp.q) + ", phi(n) = " + to_string(kp.phi) + ")";
+}
+
 // Server side computation for one MSG line. Returns true if the message is accepted.
 // Throws std::exception (with a readable text) if the data cannot even be processed.
-static bool processMessage(const string &line, const rsa::KeyPair &kp, string &reason) {
+// sectionStarted becomes true once the "Server Side:" part of the output has begun.
+static bool processMessage(const string &line, const rsa::KeyPair &kp, string &reason, bool &sectionStarted) {
     vector<string> t = splitWords(line);
     if (t.size() != 6 || t[0] != "MSG") throw runtime_error("bad MSG format");
 
@@ -54,17 +63,25 @@ static bool processMessage(const string &line, const rsa::KeyPair &kp, string &r
     if (clientPub.n <= 0xFFFFFFFFULL || clientPub.e < 2)      // also protects against n = 0
         throw runtime_error("invalid client public key");
 
-    cout << "Received: ciphertext (" << cipher.size() << " bytes), encrypted secret key, signature, client public key\n";
-    cout << "Client Public Key       : (e = " << clientPub.e << ", n = " << clientPub.n << ")\n";
-    cout << "Encrypted Secret Key    : " << t[2] << "\n";
-    cout << "Cipher text             : " << t[1] << "\n";
-    cout << "Client Signature        : " << t[3] << "\n\n";
+    // what arrived (connection log - printed BEFORE the formatted "Server Side" section)
+    cout << "Received from client: ciphertext (" << cipher.size() << " bytes), encrypted secret key, signature, client public key\n";
+    cout << "  Received client public key    : (e = " << clientPub.e << ", n = " << clientPub.n << ")\n";
+    cout << "  Received encrypted secret key : " << t[2] << "\n";
+    cout << "  Received ciphertext           : " << t[1] << "\n";
+    cout << "  Received client signature     : " << t[3] << "\n";
+
+    // ================= main output section: format of the assignment PDF =================
+    cout << "\nServer Side:\n\n";
+    sectionStarted = true;
+    cout << "Input:\n";
+    cout << "  Public Key parameters: " << publicKeyText(kp) << "\n";
+    cout << "  Private key parameters: " << privateKeyText(kp) << "\n\n";
 
     // 1. decrypt the secret key with the server private key
     uint32_t secret = rsa::decryptKey(encKey, kp.priv());
     util::Bytes keyBytes;
     for (int s = 24; s >= 0; s -= 8) keyBytes.push_back((uint8_t)((secret >> s) & 0xFF));
-    cout << "Decrypted Secret key    : " << util::toHex(keyBytes) << "\n\n";
+    cout << "Decrypted Secret key: " << util::toHex(keyBytes) << "\n\n";
 
     // 2. decrypt the ciphertext with Simplified IDEA (prints every round)
     cout << "Intermediate decryption process:\n";
@@ -74,18 +91,18 @@ static bool processMessage(const string &line, const rsa::KeyPair &kp, string &r
     } catch (const exception &ex) {
         throw runtime_error(string("IDEA decryption failed: ") + ex.what());
     }
-    cout << "\nDecrypt Message         : " << cli::printable(util::bytesToStr(plain)) << "\n";
+    cout << "\nDecrypt Message: " << cli::printable(util::bytesToStr(plain)) << "\n";
 
     // 3. hash of the decrypted message
     util::Bytes digest = whirlpool::hash(plain);
-    cout << "Hash code               : " << util::toHex(digest) << "\n";
+    cout << "Hash code: " << util::toHex(digest) << "\n";
 
     // 4. verify the signature: recover the hash from it with the client public key
     util::Bytes recovered;
     bool valid = rsa::verify(digest, sigs, clientPub, &recovered);
-    cout << "Verification code       : " << util::toHex(recovered) << "\n";
-    cout << "Signature               : " << (valid ? "valid" : "invalid") << "\n";
-    cout << "Message                 : " << (valid ? "Accepted" : "Rejected") << "\n";
+    cout << "Verification code: " << util::toHex(recovered) << "\n";
+    cout << "Signature: " << (valid ? "valid" : "invalid") << "\n";
+    cout << "Message: " << (valid ? "Accepted" : "Rejected") << "\n";
     if (!valid) reason = "signature invalid";
     return valid;
 }
@@ -106,14 +123,16 @@ static void handleClient(net::Socket &c, const rsa::KeyPair &kp) {
 
     // step 2: client sends ciphertext + encrypted secret key + signature + its public key
     if (!c.recvLine(line)) { cout << "Client disconnected before sending the message.\n"; return; }
-    cout << "\n----------------- SERVER SIDE -----------------\n";
     string reason;
     bool accepted = false;
+    bool sectionStarted = false;
     try {
-        accepted = processMessage(line, kp, reason);
+        accepted = processMessage(line, kp, reason, sectionStarted);
     } catch (const exception &ex) {
+        // the data could not be processed: always shown as Rejected, never as Accepted
         reason = ex.what();
-        cout << "Message                 : Rejected (" << reason << ")\n";
+        if (!sectionStarted) cout << "\nServer Side:\n\n";
+        cout << "\nMessage: Rejected (" << reason << ")\n";
     }
     cout << "-----------------------------------------------\n\n";
     c.sendLine(accepted ? string("RESULT ACCEPTED") : "RESULT REJECTED " + reason);

@@ -59,6 +59,15 @@ static string readMessage() {
     }
 }
 
+// text of the key parameters, as shown in the "Input:" part of the output
+static string publicKeyText(const rsa::KeyPair &kp) {
+    return "(e = " + to_string(kp.e) + ", n = " + to_string(kp.n) + ")";
+}
+static string privateKeyText(const rsa::KeyPair &kp) {
+    return "(d = " + to_string(kp.d) + ", n = " + to_string(kp.n) + ", p = " + to_string(kp.p) +
+           ", q = " + to_string(kp.q) + ", phi(n) = " + to_string(kp.phi) + ")";
+}
+
 static util::Bytes keyToBytes(uint32_t k) {
     util::Bytes b;
     for (int s = 24; s >= 0; s -= 8) b.push_back((uint8_t)((k >> s) & 0xFF));
@@ -101,16 +110,8 @@ int main(int argc, char **argv) {
             }
         }
 
-        cout << "\n----------------- CLIENT SIDE -----------------\n"
-             << "Input:\n"
-             << "  Message                  : " << cli::printable(message) << "\n"
-             << "  Secret Key               : " << util::toHex(keyToBytes(secret)) << "\n"
-             << "  Key generation parameters: p = " << kp.p << ", q = " << kp.q << ", e = " << kp.e << "\n"
-             << "  Public Key parameters    : (e = " << kp.e << ", n = " << kp.n << ")\n"
-             << "  Private key parameters   : (d = " << kp.d << ", n = " << kp.n << ")   [phi(n) = " << kp.phi << "]\n\n";
-
-        // ---- ask the server for its public key ----
-        cout << "Connecting to server " << host << ":" << port << " ...\n";
+        // ---- ask the server for its public key (connection log, printed BEFORE the formatted section) ----
+        cout << "\nConnecting to server " << host << ":" << port << " ...\n";
         net::Socket s;
         s.connectTo(host, port);
         cout << "Connected. Requesting the server public key...\n";
@@ -124,27 +125,35 @@ int main(int argc, char **argv) {
             throw runtime_error("unexpected reply from the server: " + cli::printable(line.substr(0, 100)));
         if (serverPub.n <= 0xFFFFFFFFULL || serverPub.e < 2)
             throw runtime_error("the server sent an invalid public key");
-        cout << "Server Public Key        : (e = " << serverPub.e << ", n = " << serverPub.n << ")\n\n";
+        cout << "Server public key received: (e = " << serverPub.e << ", n = " << serverPub.n << ")\n";
+
+        // ================= main output section: format of the assignment PDF =================
+        cout << "\nClient Side:\n\n"
+             << "Input:\n"
+             << "  Message: " << cli::printable(message) << "\n"
+             << "  Secret Key: " << util::toHex(keyToBytes(secret)) << "\n"
+             << "  Public Key parameters: " << publicKeyText(kp) << "\n"
+             << "  Private key parameters: " << privateKeyText(kp) << "\n\n";
 
         // ---- 1. encrypt the secret key with the server public key (RSA) ----
         rsa::u64 encKey = rsa::encryptKey(secret, serverPub);
         string encKeyHex = rsa::u64ToHex(encKey);
-        cout << "Encrypted Secret Key     : " << encKeyHex << "\n\n";
+        cout << "Encrypted Secret Key: " << encKeyHex << "\n\n";
 
         // ---- 2. encrypt the message with Simplified IDEA (prints every round) ----
         util::Bytes msgBytes = util::strToBytes(message);
         cout << "Intermediate encryption process:\n";
         util::Bytes cipher = idea::encrypt(msgBytes, secret, true);
         string cipherHex = util::toHex(cipher);
-        cout << "\nCipher text              : " << cipherHex << "\n";
+        cout << "\nCipher text: " << cipherHex << "\n";
 
         // ---- 3. hash of the message (Whirlpool) ----
         util::Bytes digest = whirlpool::hash(msgBytes);
-        cout << "Hash code                : " << util::toHex(digest) << "\n";
+        cout << "Hash code: " << util::toHex(digest) << "\n";
 
         // ---- 4. digital signature over the hash with the client private key (RSA) ----
         string sigHex = rsa::sigsToHex(rsa::sign(digest, kp.priv()));
-        cout << "Digital Signature        : " << sigHex << "\n";
+        cout << "Digital Signature: " << sigHex << "\n";
         cout << "-----------------------------------------------\n\n";
 
         // ---- send everything ----
@@ -153,7 +162,7 @@ int main(int argc, char **argv) {
         cout << "Sent: ciphertext + encrypted secret key + client signature + client public key\n";
 
         if (!s.recvLine(line)) throw runtime_error("the server closed the connection without an answer");
-        cout << "Server response          : " << cli::printable(line) << "\n";
+        cout << "Server response: " << cli::printable(line) << "\n";
         return line == "RESULT ACCEPTED" ? 0 : 2;
 
     } catch (const exception &ex) {
